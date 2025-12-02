@@ -1,0 +1,380 @@
+\documentclass[12pt,a4paper]{article}
+% 核心宏包（基础→扩展→中文→链接）
+\usepackage{amsmath,amssymb,graphicx,geometry,amsthm,url,subcaption}
+\usepackage{ctex} % 中文支持
+\usepackage{hyperref} % 链接支持（最后加载）
+
+% 页面与格式设置
+\geometry{left=3.17cm,right=3.17cm,top=2.54cm,bottom=2.54cm} % 标准页边距
+\renewcommand{\rmdefault}{ptm} % 正文Times New Roman字体
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, pdfencoding=auto}
+
+% 修复公式标签重复括号：仅保留数字（公式环境自动加括号）
+\renewcommand{\theequation}{\arabic{equation}}
+
+% 定义学术环境（按章节/定理编号）
+\theoremstyle{definition}
+\newtheorem{definition}{定义}[section]
+\theoremstyle{plain}
+\newtheorem{theorem}{定理}[section]
+\newtheorem{corollary}{推论}[theorem]
+
+\title{一种统一的模型预测解释方法}
+% 作者排版：双列同排对齐（无分组冲突）
+\author{
+\parbox{0.48\textwidth}{\centering
+斯科特·M·伦德伯格（Scott M. Lundberg） \\
+华盛顿大学保罗·G·艾伦计算机科学学院，西雅图，华盛顿州 98105 \\
+\href{mailto:slund1@cs.washington.edu}{slund1@cs.washington.edu}
+}
+\hfill
+\parbox{0.48\textwidth}{\centering
+徐-仁·李（Su-In Lee） \\
+华盛顿大学保罗·G·艾伦计算机科学学院、基因组科学系，西雅图，华盛顿州 98105 \\
+\href{mailto:suinlee@cs.washington.edu}{suinlee@cs.washington.edu}
+}
+}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+在许多应用场景中，理解模型为何做出某一预测，其重要性不亚于预测本身的准确性。然而，对于现代大型数据集，最高预测精度往往由复杂模型（如集成模型或深度学习模型）实现，这类模型即便对专家而言也难以解释，由此导致模型的“准确性”与“可解释性”之间存在矛盾。对此，近年来已有多种方法被提出以帮助用户解释复杂模型的预测结果，但这些方法之间的关联以及适用场景的差异仍不明确。为解决这一问题，本文提出一种统一的预测解释框架——SHAP（SHapley Additive exPlanations，沙普利加性解释）。SHAP会为每个特征分配一个针对特定预测的重要性值，其创新性体现在两方面：（1）识别出一类新的加性特征重要性度量方法；（2）通过理论证明，该类方法中存在唯一满足一组理想性质的解。这一新类别统一了现有6种解释方法，值得注意的是，该类别中部分近年提出的方法并不具备上述理想性质。基于这种统一性带来的洞见，本文提出的新方法相较于现有方法，在计算性能上更优，且/或与人类直觉的一致性更强。
+\end{abstract}
+
+\section{引言}
+准确解释预测模型的输出结果至关重要：它能建立用户对模型的合理信任，为模型改进提供思路，并助力理解模型所刻画的实际过程。在部分应用中，简单模型（如线性模型）因易于解释而被优先选用，即便其精度可能低于复杂模型。然而，随着大数据的可获取性不断提升，使用复杂模型的收益显著增加，这使得模型输出的“准确性”与“可解释性”之间的权衡成为核心问题。目前已有多种方法被提出以解决该问题\cite{bach2015pixel,shrikumar2017learning,strumbelj2014explaining,datta2016algorithmic,lipovetsky2001analysis,ribeiro2016why}，但这些方法之间的关联及适用场景差异仍缺乏清晰认知。
+
+本文提出一种新颖的模型预测解释统一方法\footnote{\url{https://github.com/slundberg/shap}}。该方法得出三项可能令人意外的结果，为日益丰富的解释方法领域提供了清晰视角：\\
+1. 本文将模型预测的任何解释视为一个“解释模型”，并基于此定义“加性特征归因方法”类别（见第2章），该类别统一了现有6种解释方法；\\
+2. 本文通过博弈论理论证明，上述加性特征归因方法类别存在唯一解，并提出“SHAP值”作为各类方法所逼近的统一特征重要性度量（见第4章）；\\
+3. 本文提出新的SHAP值估计方法，并通过用户研究验证：相较于现有多种方法，新方法与人类直觉的一致性更强，且对模型输出类别的区分效果更优（见第5章）。
+
+
+\section{加性特征归因方法}
+对于简单模型，其最佳解释就是模型本身——既能完美表征自身，又易于理解。但对于集成模型、深度网络等复杂模型，无法将原模型作为自身的最佳解释（因其难以理解），此时需采用“解释模型”：即对原模型的可解释性近似。本文将证明，现有文献中的6种解释方法均采用同一类解释模型；这种此前未被关注的统一性具有重要意义，后续章节将展开说明。
+
+设$f$为待解释的原预测模型，$g$为解释模型。本文聚焦于“局部解释方法”：这类方法基于单个输入$x$解释预测结果$f(x)$（如LIME方法\cite{ribeiro2016why}所提出的思路）。解释模型通常使用“简化输入”$x'$，其通过映射函数$x=h_x(x')$与原输入关联。局部方法需确保：当$z' \approx x'$时，$g(z') \approx f(h_x(z'))$（需注意，尽管$x'$的信息可能少于$x$，但因$h_x$是针对当前输入$x$的映射，故$h_x(x')=x$）。
+
+\begin{definition}[加性特征归因方法]
+加性特征归因方法的解释模型是\textbf{二元变量的线性函数}，形式如下：
+\begin{equation}
+g(z')=\phi_0+\sum_{i=1}^{M} \phi_i z_i',
+\end{equation}
+其中$z' \in \{0,1\}^M$（$M$为简化输入的特征数量），$\phi_i \in \mathbb{R}$（$\phi_i$为特征归因值）。
+\end{definition}
+
+满足定义1的解释模型，会为每个特征分配一个归因效应$\phi_i$，所有特征的归因效应之和可近似原模型的输出$f(x)$。现有多种解释方法均满足该定义，下文将介绍其中几种。
+
+\subsection{LIME方法}
+LIME（局部可解释模型无关解释）通过在特定预测结果附近“局部近似”原模型，实现对单个预测的解释\cite{ribeiro2016why}。LIME使用的“局部线性解释模型”完全符合公式（1），因此属于加性特征归因方法。
+
+在LIME中，简化输入$x'$被称为“可解释输入”，映射函数$x=h_x(x')$将二元可解释输入向量转换为原输入空间，且不同输入空间对应不同的$h_x$映射：
+- 对于词袋文本特征：$h_x$将“1/0”（特征存在/不存在）映射为原词频（若简化输入为1，则保留原词频；若为0，则词频设为0）；
+- 对于图像特征：$h_x$将图像划分为超像素，“1”表示保留超像素原始值，“0”表示用相邻超像素的平均值替换该超像素（模拟“特征缺失”场景）。
+
+为求解$\phi$，LIME最小化以下目标函数：
+\begin{equation}
+\min_{g \in G} L(f, g, \pi_{x'}) + \Omega(g)
+\end{equation}
+其中，解释模型$g(z')$对原模型的“忠实性”由简化输入空间样本集上的损失$L$（加权局部核$\pi_{x'}$）保证；$\Omega$为解释模型$g$的复杂度惩罚项。由于LIME的$g$符合公式（1）且$L$为平方损失，公式（2）可通过惩罚线性回归（penalized linear regression）求解。
+
+\subsection{DeepLIFT方法}
+DeepLIFT（深度网络层间相关性传播）是近年提出的深度学习模型递归预测解释方法\cite{shrikumar2017learning,shrikumar2016not}。它为每个输入$x_i$分配一个值$C_{\Delta x_i \Delta y}$，表示该输入从“原始值”变为“参考值”时产生的效应。
+
+
+对于DeepLIFT，映射函数$x=h_x(x')$将二元值转换为原输入：“1”表示输入保留原始值，“0”表示输入采用参考值（参考值由用户选择，代表特征的“无信息背景值”）。
+\begin{equation}
+\sum_{i=1}^{n} C_{\Delta x_i \Delta o} = \Delta o,
+\label{eq:sum_to_delta}
+\end{equation}
+
+DeepLIFT满足“求和-差值性质”（summation-to-delta property）：设$o=f(x)$为模型输出，$\Delta o=f(x)-f(r)$（$r$为参考输入），$\Delta x_i=x_i-r_i$。若令$\phi_i=C_{\Delta x_i \Delta o}$且$\phi_0=f(r)$，则DeepLIFT的解释模型完全符合公式（1），因此也属于加性特征归因方法。
+
+\subsection{层间相关性传播方法}
+层间相关性传播（Layer-Wise Relevance Propagation，LRP）是用于解释深度网络预测的方法\cite{bach2015pixel}。正如Shrikumar等人所指出的，LRP等价于“所有神经元参考激活值固定为0”的DeepLIFT。
+
+因此，LRP的映射函数$x=h_x(x')$将二元值转换为原输入空间：“1”表示输入保留原始值，“0”表示输入设为0。与DeepLIFT类似，LRP的解释模型也符合公式（1），属于加性特征归因方法。
+
+\subsection{经典沙普利值估计方法}
+现有三种方法基于合作博弈论的经典公式计算模型预测解释，分别是：沙普利回归值\cite{lipovetsky2001analysis}、沙普利采样值\cite{strumbelj2014explaining}和定量输入影响\cite{datta2016algorithmic}。
+
+\paragraph{沙普利回归值}
+沙普利回归值用于衡量\textbf{存在多重共线性时线性模型的特征重要性}。该方法需在所有特征子集$S \subseteq F$（$F$为全部特征集）上重新训练模型，并为每个特征分配“包含该特征对预测结果的效应”作为重要性值。
+
+具体而言，对于特征$i$，训练两个模型：包含特征$i$的$f_{S \cup \{i\}}$，以及不含特征$i$的$f_S$；通过比较两个模型在当前输入上的预测差$f_{S \cup \{i\}}(x_{S \cup \{i\}})-f_S(x_S)$（$x_S$表示特征集$S$的输入值），得到特征$i$的局部效应。由于“剔除特征的效应”依赖于模型中的其他特征，需对所有可能的子集$S \subseteq F \setminus \{i\}$计算上述差值，沙普利值即为这些差值的加权平均：
+\begin{equation}  % 补充缺失的公式3
+\phi_i = \sum_{S \subseteq F \setminus \{i\}} \frac{|S|! \cdot (|F| - |S| - 1)!}{|F|!} \left( f_{S \cup \{i\}}(x_{S \cup \{i\}}) - f_S(x_S) \right)
+\end{equation}
+对于沙普利回归值，映射函数$h_x$将“1/0”转换为原输入空间：“1”表示特征包含在模型中，“0”表示特征被剔除。若令$\phi_0=f_\emptyset(\emptyset)$（$\emptyset$表示空集），则沙普利回归值的解释模型符合公式（1），属于加性特征归因方法。
+
+\paragraph{沙普利采样值}
+沙普利采样值通过以下两点实现对任意模型的解释：（1）对公式（3）进行采样近似；（2）通过对训练数据集积分，近似“剔除变量对模型的效应”。这种方法无需重新训练模型，且所需计算的差值数量远少于$2^{|F|}$（$|F|$为特征总数）。
+
+由于沙普利采样值的解释模型形式与沙普利回归值一致，因此也属于加性特征归因方法。
+
+\paragraph{定量输入影响}
+定量输入影响（Quantitative Input Influence，QII）是一个更宽泛的框架，不仅限于特征归因；但在其方法体系中，独立提出了一种与沙普利采样值几乎完全一致的“沙普利值采样近似方法”，因此也属于加性特征归因方法。
+
+\section{加性特征归因的唯一确定性质}
+加性特征归因方法类别有一个令人意外的特性：该类别中存在\textbf{唯一满足三项理想性质}的解（性质定义见下文）。尽管这些性质在经典沙普利值估计方法中已被熟知，但此前尚未发现其对其他加性特征归因方法同样适用。
+
+\paragraph{性质1 局部准确性（Local Accuracy）}
+当用解释模型近似原模型$f$或特定输入$x$时，局部准确性要求：解释模型至少需匹配$f$的输出或简化输入$x'$（$x'$对应原输入$x$），即：
+\begin{equation}
+f(x)=g(x')=\phi_0+\sum_{i=1}^{M} \phi_i x_i'
+\end{equation}
+其中，当$x=h_x(x')$时，解释模型$g(x')$与原模型$f(x)$的输出相等。
+
+\paragraph{性质2 缺失性（Missingness）}
+若简化输入$z'$中的“0”表示“特征缺失”，则缺失性要求：原输入中缺失的特征，其归因值必须为0。第2章介绍的所有方法均满足缺失性，即：
+\begin{equation}
+x_i'=0 \Rightarrow \phi_i=0
+\end{equation}
+缺失性约束了“简化输入中为0的特征”，使其归因效应为0。
+
+\paragraph{性质3 一致性（Consistency）}
+一致性表示：若模型发生变化，导致某一简化输入的贡献“在不依赖其他输入的情况下增加或保持不变”，则该输入的归因值不应减少。
+
+形式化定义：设$f_x(z')=f(h_x(z'))$，$z' \setminus i$表示“将$z_i'=0$后的简化输入”。对于任意两个模型$f$和$f'$，若对所有输入$z' \in \{0,1\}^M$，均满足：
+\begin{equation}
+f_x'(z')-f_x'(z' \setminus i) \geq f_x(z')-f_x(z' \setminus i)
+\end{equation}
+则必有$\phi_i(f',x) \geq \phi_i(f,x)$。
+
+\paragraph{定理1 加性特征归因的唯一解}
+在加性特征归因方法类别（定义1）中，\textbf{唯一同时满足性质1、2、3的解释模型$g$}对应的归因值为：
+\begin{equation}
+\phi_i(f, x)=\sum_{z' \subseteq x'} \frac{|z'|! \cdot (M-|z'|-1)!}{M!} \left( f_x(z') - f_x(z' \setminus i) \right)
+\end{equation}
+其中，$|z'|$表示$z'$中非零元素的个数，$z' \subseteq x'$表示“$z'$的非零元素是$x'$非零元素子集”的所有二元向量。
+
+\textbf{定理1的推导}：结合合作博弈论结果，公式（7）中的$\phi_i$即为“沙普利值”\cite{shapley1953value}。Young（1985）证明，沙普利值是唯一满足“与性质1、3类似的三项公理”的解（第三项公理在本文场景中可证明为冗余，详见补充材料）；而性质2是将沙普利值证明适配到加性特征归因方法类别的关键约束。
+
+在给定简化输入映射$h_x$且满足性质1-3的前提下，定理1表明：加性特征归因方法存在唯一解。这一结果意味着：\textbf{不基于沙普利值的方法，必然违反局部准确性和/或一致性}（第2章的方法已满足缺失性）。下一章将提出统一方法，改进现有方法以避免无意违反性质1和3。
+
+\section{SHAP（沙普利加性解释）值}
+本文提出“SHAP值”作为统一的特征重要性度量，其本质是“原模型条件期望函数的沙普利值”，因此是公式（7）的解（其中$f_x(z')=f(h_x(z'))=E[f(z) | z_S]$，$S$为$z'$中非零元素的索引集，见图1）。
+
+基于第2、3章的结论，SHAP值是\textbf{唯一同时满足性质1-3，且通过条件期望定义简化输入}的加性特征重要性度量。SHAP值的定义中隐含简化输入映射$h_x(z')=z_S$（$z_S$表示“特征集$S$之外的特征为缺失值”的输入）；由于多数模型无法处理任意缺失模式的输入，本文用$E[f(z) | z_S]$近似$f(z_S)$。
+
+SHAP值的定义旨在：与沙普利回归值、沙普利采样值、定量输入影响等方法的特征归因结果保持一致，同时建立与LIME、DeepLIFT、层间相关性传播的关联。
+
+SHAP值的精确计算具有挑战性。不过，结合现有加性特征归因方法的洞见，我们可以对其进行近似计算。本文介绍两种模型无关的近似方法：一种是已有的方法（沙普利采样值），另一种是新方法（Kernel SHAP）；同时还介绍四种模型特定的近似方法，其中两种为新方法（Max SHAP、Deep SHAP）。使用这些方法时，“特征独立性”和“模型线性性”是两个可选假设，可简化期望的计算（注：$\bar{S}$ 表示不在集合 $S$ 中的特征集）：
+
+\begin{align}
+f(h_x(z')) &= E[f(z) \mid z_S] & \text{SHAP解释模型的简化输入映射} \label{eq:shap_map} \\
+&= E_{z_{\bar{S}} \mid z_S}[f(z)] & \text{对 } z_{\bar{S}} \mid z_S \text{ 的期望} \label{eq:cond_exp} \\
+&\approx E_{z_{\bar{S}}}[f(z)] & \text{假设特征独立（如文献\cite{strumbelj2014explaining,datta2016algorithmic,shrikumar2017learning,ribeiro2016why}）} \label{eq:indep_assump} \\
+&\approx f\left( [z_S, E[z_{\bar{S}}]] \right). & \text{假设模型线性} \label{eq:linear_assump}
+\end{align}
+
+\subsection{模型无关近似方法}
+如果在近似条件期望时（公式11）假设特征独立性（如\cite{strumbelj2014explaining,datta2016algorithmic,shrikumar2017learning,ribeiro2016why}所述），则可直接使用沙普利采样值方法\cite{strumbelj2014explaining}或等价的定量输入影响方法\cite{datta2016algorithmic}来估计SHAP值。这些方法通过对经典沙普利值公式的置换版本（公式8）进行采样近似实现。每种特征归因都需要单独的采样估计。尽管对于少量输入而言计算是可行的，但下文中介绍的Kernel SHAP方法仅需更少的原始模型评估次数，即可达到相近的近似精度（第5节）。
+
+\paragraph{Kernel SHAP（线性LIME + 沙普利值）}
+线性LIME通过“简化二元输入空间中的局部线性模型”近似$f$；初看之下，LIME的回归公式（2）与经典沙普利值公式（7）差异显著，但由于线性LIME属于加性特征归因方法，因此\textbf{沙普利值是唯一满足性质1-3（局部准确性、缺失性、一致性）的公式（2）解}。
+
+一个自然的问题是：公式（2）的解是否能复现沙普利值？答案取决于损失函数$L$、加权核$\pi_{x'}$和正则项$\Omega$的选择。LIME对这些参数的选择基于启发式，因此其解无法复现沙普利值，进而导致局部准确性和/或一致性被违反，最终在某些场景下出现反直觉结果（见第5章）。
+
+下文将说明：如何避免对公式（2）参数的启发式选择，找到能复现沙普利值的$L$、$\pi_{x'}$和$\Omega$。
+
+\paragraph{定理2 沙普利核（Shapley Kernel）}
+在定义1的前提下，\textbf{使公式（2）的解满足性质1-3的$\pi_{x'}$、$L$和$\Omega$的具体形式}为：
+\begin{equation}
+\Omega(g)=0,
+\end{equation}
+\begin{equation}
+\pi_{x'}(z')=\frac{M-1}{\dbinom{M}{|z'|} \cdot |z'| \cdot (M-|z'|)},
+\end{equation}
+\begin{equation}
+L(f,g,\pi_{x'})=\sum_{z' \in Z} \left( f(h_x^{-1}(z')) - g(z') \right)^2 \cdot \pi_{x'}(z')
+\end{equation}
+其中$|z'|$表示$z'$中非零元素的个数，$\dbinom{M}{|z'|}$为组合数（从$M$中选$|z'|$）。
+
+\textbf{定理2的证明}：详见补充材料。
+
+需特别注意：当$|z'| \in \{0, M\}$时，$\pi_{x'}(z')=\infty$，这一约束确保$\phi_0=f_x(\emptyset)$且$f(x)=\sum_{i=0}^M \phi_i$。在实际优化中，可通过解析方法消除这两个变量，避免处理无穷权重。
+
+由于定理2中的$g(z')$假设为线性形式，且$L$为平方损失，公式（2）仍可通过线性回归求解。这意味着：\textbf{博弈论中的沙普利值可通过加权线性回归计算}\footnote{在本文撰写过程中，作者发现这与计量经济学中提出的“沙普利值约束二次最小化形式”\cite{charnes1988extremal}具有相似性。}。由于LIME的简化输入映射与公式（11）中的SHAP映射近似等价，因此可通过“基于回归的模型无关方法”估计SHAP值。与直接使用经典沙普利公式相比，通过回归联合估计所有SHAP值的样本效率更高（见第5章）。
+
+线性回归与沙普利值的直观关联在于：公式（7）是“均值之差”，而均值本身是一组数据点的最佳最小二乘点估计；因此，寻找能使线性最小二乘回归复现沙普利值的加权核是自然思路——这一核与此前基于启发式选择的核有显著差异（见图2）。
+
+\subsection{模型特定近似方法}
+Kernel SHAP提升了模型无关SHAP值估计的样本效率；若聚焦于特定类型的模型，可开发更快的“模型特定近似方法”。
+
+\paragraph{（1）线性SHAP（Linear SHAP）}
+对于线性模型，若假设输入特征独立（公式（11）），则SHAP值可直接通过模型的权重系数近似。
+
+\begin{corollary}[线性SHAP]
+给定线性模型$f(x)=\sum_{j=1}^M w_j x_j + b$，则：
+\begin{equation}
+\phi_0(f,x)=b, \quad \phi_i(f,x)=w_j \left( x_j - E[x_j] \right)
+\end{equation}
+\end{corollary}
+
+该推论由定理2和公式（11）推导得出，Štrumbelj与Kononenko\cite{strumbelj2014explaining}此前也提出过类似结论。
+
+\paragraph{（2）低阶SHAP（Low-Order SHAP）}
+若选择公式（10）或（11）的条件期望近似，定理2中的线性回归复杂度为$O(2^M + M^3)$，因此对于较小的$M$（简化输入特征数），该方法效率较高。
+
+\paragraph{（3）Max SHAP}
+基于沙普利值的置换形式，可计算“每个输入使最大值超过其他所有输入的概率”；通过对输入值进行排序，可在$O(M^2)$时间内计算$M$个输入的max函数沙普利值（传统方法需$O(M \cdot 2^M)$时间）。完整算法见补充材料。
+
+\paragraph{（4）Deep SHAP（DeepLIFT + 沙普利值）}
+Kernel SHAP可用于包括深度模型在内的任意模型，但一个自然的问题是：能否利用深度网络的“组合性”提升计算性能？本文通过“沙普利值与DeepLIFT的关联”（此前未被关注）找到答案\cite{shrikumar2016not}。
+
+若将公式（3）中的“参考值”解释为公式（11）中的$E[x]$，则DeepLIFT在“假设输入特征独立且深度模型线性”的前提下，可近似SHAP值。DeepLIFT使用“线性组合规则”（等价于对神经网络的非线性组件进行线性化），其定义“组件线性化方式”的反向传播规则虽直观，但基于启发式选择。
+
+由于DeepLIFT属于加性特征归因方法且满足局部准确性和缺失性，因此\textbf{沙普利值是唯一满足一致性的归因值}——这一结论推动DeepLIFT被改造为“SHAP值的组合性近似方法”，即Deep SHAP。
+
+Deep SHAP通过“将网络小组件的SHAP值组合为整个网络的SHAP值”实现近似：它以DeepLIFT风格的反向传播方式，将“基于SHAP值定义的乘数”在网络中递归传递（见图2），具体公式如下：
+\begin{equation}
+m_{x_j f_3}=\frac{\phi_i(f_3, x)}{x_j - E[x_j]}
+\end{equation}
+\begin{equation}
+\forall_{j \in \{1,2\}} \ m_{y_i f_j}=\frac{\phi_i(f_j, y)}{y_i - E[y_i]}
+\end{equation}
+\begin{equation}
+m_{y_i f_3}=\sum_{j=1}^2 m_{y_i f_j} \cdot m_{x_j f_3} \quad \text{（链式法则）}
+\end{equation}
+\begin{equation}
+\phi_i(f_3, y) \approx m_{y_i f_3} \cdot (y_i - E[y_i]) \quad \text{（线性近似）}
+\end{equation}
+
+对于线性组件、最大池化组件或单输入激活函数等简单网络组件，其SHAP值可通过解析方法高效求解；基于上述组合规则，可快速近似整个模型的SHAP值。Deep SHAP无需通过启发式选择组件线性化方式，而是从“组件SHAP值”中推导有效的线性化方式——以max函数为例，这种方式可显著提升归因效果（见第5章）。
+
+\begin{figure}[h]
+\centering
+\caption{SHAP值通过“特征条件期望的变化”为每个特征分配归因值：从基准值$E[f(z)]$（无任何特征信息时的预测值）到当前输出$f(x)$的差异，由各特征的SHAP值之和解释。图示为单一特征排序；对于非线性模型或依赖特征，特征添加顺序会影响归因结果，SHAP值通过对所有可能排序的$\phi_i$取平均来消除顺序偏差。}
+\label{fig:shap_basics}
+% 图片尺寸控制：width=0.8\textwidth确保在页边距内
+\includegraphics[width=0.8\textwidth]{/Users/mac/Documents/CodeProject/TexDocuments/pic/p1.png}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+% 子图尺寸控制：0.45\textwidth避免溢出，间距合理
+\subcaptionbox{沙普利核的权重在“按基数排序的所有$z'$向量”上具有对称性（本例含$2^{15}$个向量），与此前基于启发式选择的核有显著差异；}[0.45\textwidth]{
+\includegraphics[width=1\textwidth]{/Users/mac/Documents/CodeProject/TexDocuments/pic/p2.png}
+}
+\subcaptionbox{深度神经网络等组合模型由多个简单组件构成，若已知组件SHAP值的解析解，可通过DeepLIFT风格的反向传播快速近似整个模型的SHAP值；}[0.45\textwidth]{
+
+}
+\caption{沙普利核与深度网络组合性示意图}
+\label{fig:kernel_deep}
+\end{figure}
+
+\section{计算实验与用户研究}
+本文通过Kernel SHAP和Deep SHAP两种近似方法评估SHAP值的优势，具体包括三部分：
+1. 比较Kernel SHAP与LIME、沙普利采样值的计算效率和准确性；
+2. 设计用户研究，比较SHAP值与DeepLIFT、LIME的特征归因结果；
+3. 以MNIST手写数字分类任务为例，比较SHAP与DeepLIFT、LIME的解释效果。
+
+结果表明：相较于不满足性质1-3的方法（第2章），SHAP值与人类直觉的一致性更强。
+
+\subsection{计算效率}
+定理2建立了“博弈论沙普利值”与“加权线性回归”的关联，Kernel SHAP利用这一关联计算特征重要性——与公式（7）的传统采样估计相比，Kernel SHAP在“更少的原模型评估次数”下可获得更准确的估计（尤其当为线性模型添加正则化时，见图3）。
+
+在“稠密决策树模型”和“稀疏决策树模型”上对三种方法的对比显示：Kernel SHAP的样本效率显著更高，且LIME的归因结果与满足“局部准确性、一致性”的SHAP值存在显著差异。
+
+\begin{figure}[h]
+\centering
+\subcaptionbox{稠密决策树（10个输入特征）——单个输入的特征重要性解释；}[0.45\textwidth]{
+\includegraphics[width=1\textwidth]{/Users/mac/Documents/CodeProject/TexDocuments/pic/p3.png}
+}
+\subcaptionbox{稀疏决策树（100个输入特征中仅3个有效）——单个输入的特征重要性解释；}[0.45\textwidth]{
+
+}
+\caption{三种加性特征归因方法的效率对比：Kernel SHAP（使用去偏LASSO）、沙普利采样值、LIME（开源实现）。每个样本量下重复200次估计，图中显示10分位数和90分位数；横轴为“原模型函数评估次数”，纵轴为“特征重要性估计值”。}
+\label{fig:efficiency}
+\end{figure}
+
+\subsection{与人类直觉的一致性}
+定理1表明：所有加性特征归因方法都应优先使用SHAP值；而LIME和DeepLIFT的原始实现所计算的特征重要性值与SHAP值存在差异。为验证定理1的重要性，本文通过Amazon Mechanical Turk招募用户，将LIME、DeepLIFT、SHAP的解释结果与“理解模型的人类给出的解释”进行对比（假设“好的模型解释应与人类解释一致”）。
+
+本文在两种场景下进行对比：
+1. \textbf{疾病评分场景}：当且仅当两个症状中仅出现一个时，疾病评分更高（见图4）；
+2. \textbf{最大值分配场景}：三个参与者基于“个人最高分”获得奖金，DeepLIFT可应用于该场景（见图4）。
+
+在两种场景中，均要求参与者将“输出结果（疾病评分或奖金）的贡献”分配给“输入（症状或参与者）”。结果显示：SHAP解释与人类解释的一致性显著高于其他方法；尤其在max函数场景中，SHAP的优势解决了DeepLIFT在“最大池化函数解释”中的开放性问题\cite{shrikumar2017learning}。
+
+\begin{figure}[h]
+\centering
+\subcaptionbox{30名随机参与者对“疾病评分模型”的特征归因（模型输出规则：发烧和咳嗽同时出现时输出2，仅出现一个时输出5，均不出现时输出0）；}[0.45\textwidth]{
+\includegraphics[width=1\textwidth]{/Users/mac/Documents/CodeProject/TexDocuments/pic/p4.png}
+}
+\subcaptionbox{52名随机参与者对“奖金分配模型”的特征归因（三名参与者分别答对5、4、0道题，奖金基于最高分确定为5美元）；}[0.45\textwidth]{
+
+}
+\caption{人类解释与三种方法解释的一致性对比：纵轴为“特征影响估计值”，横轴为“输入特征（症状或参与者）”；人类解释为参与者中最普遍的答案。}
+\label{fig:human_study}
+\end{figure}
+
+\subsection{类别差异解释}
+如第4.2节所述，DeepLIFT的组合性思路为“SHAP值的组合性近似”（Deep SHAP）提供了启发，进而改进了DeepLIFT——新版本的DeepLIFT可更好地匹配沙普利值\cite{shrikumar2017learning}。
+
+图5将DeepLIFT的卷积网络示例扩展，以凸显“更接近SHAP值的估计方法”的优势：实验使用与\cite{shrikumar2017learning}相同的预训练模型和示例，输入归一化至[0,1]；模型包含2个卷积层、2个全连接层，输出为10分类softmax。两种DeepLIFT版本（原始版、改进版）均解释“线性层的归一化输出”，而SHAP（通过Kernel SHAP计算）和LIME解释“模型最终输出”；SHAP和LIME均使用50k样本，且LIME采用“单像素分割”以提升性能。为匹配\cite{shrikumar2017learning}的实验设置，根据每种方法的特征归因结果，掩盖20\%的像素以将模型预测类别从“8”改为“3”。
+
+\begin{figure}[h]
+\centering
+\subcaptionbox{红色区域表示“增加类别概率的像素”，蓝色区域表示“降低类别概率的像素”；“Masked”表示“为将预测从8改为3而掩盖的像素”；}[0.45\textwidth]{
+\includegraphics[width=1\textwidth]{/Users/mac/Documents/CodeProject/TexDocuments/pic/p5.png}
+}
+\subcaptionbox{对20张随机图像进行掩盖时，“对数几率变化”的统计结果，支持“使用更优SHAP值估计”的结论；}[0.45\textwidth]{
+
+}
+\caption{MNIST卷积网络预测解释对比：“Orig. DeepLIFT”为无显式沙普利近似的原始版本，“New DeepLIFT”为更接近沙普利值的改进版本。}
+\label{fig:mnist}
+\end{figure}
+
+\section{结论}
+模型预测的“准确性”与“可解释性”之间的矛盾日益突出，推动了“模型解释方法”的发展。本文提出的SHAP框架具有两方面贡献：
+1. 识别出“加性特征重要性方法”类别，该类别统一了现有6种解释方法；
+2. 证明该类别中存在唯一满足理想性质的解（SHAP值）。
+
+SHAP为现有文献中的解释方法建立了统一纽带，这一发现表明：“模型解释的通用原则”可指导未来方法的开发。
+
+本文还提出了多种SHAP值估计方法，并通过理论证明和实验验证了这些方法的优势。未来研究方向包括：开发“更少假设、更快的模型特定估计方法”、整合博弈论中的“交互效应估计”、定义新的解释模型类别。
+
+\section{致谢}
+本研究得到以下资助：美国国家科学基金会（NSF）DBI-135589项目、NSF CAREER DBI-155230项目、美国癌症协会127332-RSG-15-097-01-TBG项目、美国国立卫生研究院（NIH）AG049196项目、NSF研究生研究奖学金。
+
+感谢Marco Ribeiro、Erik Štrumbelj、Avanti Shrikumar、Yair Zick、Lee实验室成员以及NIPS评审专家的反馈，这些反馈显著提升了本文质量。
+
+\newpage
+% 参考文献（LaTeX原生格式，无natbib依赖）
+\begin{thebibliography}{10}
+\bibitem{bach2015pixel}
+Sebastian Bach, et al. Predicting explanations: A unifying framework for interpreting model predictions. PLoS One, 2015, 10(7): e0130140.
+
+\bibitem{charnes1988extremal}
+A Charnes, et al. Extremal principles for game theory: Core, Chebyshev, and Shapley value. Econometrics of Planning and Efficiency, 1988, 11: 123-133.
+
+\bibitem{datta2016algorithmic}
+Anupam Datta, Shayak Sen, Yair Zick. Algorithmic transparency via quantitative input influence. IEEE Symposium on Security and Privacy, 2016: 598-617.
+
+\bibitem{lipovetsky2001analysis}
+Stan Lipovetsky, Michael Conklin. Analysis of regression in game theory approach. Applied Stochastic Models in Business and Industry, 2001, 17(4): 319-330.
+
+\bibitem{ribeiro2016why}
+Marco Tulio Ribeiro, Sameer Singh, Carlos Guestrin. "Why should I trust you?": Explaining the predictions of any classifier. ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, 2016: 1135-1144.
+
+\bibitem{shapley1953value}
+Lloyd S Shapley. A value for n-person games. Contributions to the Theory of Games, 1953, 2(28): 307-317.
+
+\bibitem{shrikumar2017learning}
+Avanti Shrikumar, Peyton Greenside, Anshul Kundaje. Learning important features through propagating activation differences. arXiv preprint arXiv:1704.02685, 2017.
+
+\bibitem{shrikumar2016not}
+Avanti Shrikumar, et al. Not just a black box: Learning important features through propagating activation differences. International Conference on Machine Learning, 2017: 3145-3153.
+
+\bibitem{strumbelj2014explaining}
+Erik Štrumbelj, Igor Kononenko. Explaining prediction models and individual predictions with feature contributions. Knowledge and Information Systems, 2014, 41(3): 647-665.
+
+\bibitem{young1985single}
+H Peyton Young. Monotonic solutions of cooperative games. International Journal of Game Theory, 1985, 14(2): 65-72.
+\end{thebibliography}
+
+\end{document}
