@@ -30,29 +30,22 @@ class Tudui(nn.Module):
     def __init__(self):
         super(Tudui, self).__init__()
         self.model = nn.Sequential(
-            # --- 卷积层 1 ---
             nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),  # 卷积层使用 ReLU
+            nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
 
-            # --- 卷积层 2 ---
             nn.Conv2d(32, 32, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),  # 卷积层使用 ReLU
+            nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
 
-            # --- 卷积层 3 ---
             nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(),  # 卷积层使用 ReLU
+            nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
 
-            # 展平
             nn.Flatten(),
 
-            # --- 全连接层 1 (隐藏层) ---
             nn.Linear(64 * 4 * 4, 64),
-            nn.ReLU(),  # 中间的全连接层通常也配合 ReLU 使用，效果更好
-
-            # --- 全连接层 2 (输出层) ---
+            nn.ReLU(),
             nn.Linear(64, 10)
         )
 
@@ -62,7 +55,6 @@ class Tudui(nn.Module):
 
 
 tudui = Tudui()
-# 2. 将模型转移到 CUDA
 tudui = tudui.to(device)
 
 # 损失函数
@@ -82,14 +74,11 @@ writer = SummaryWriter("logs/train_loss")
 start_time = time.time()
 
 for i in range(epoch):
-    print(f"-----第 {i + 1} 轮训练开始-----")
-
-    # 3. 设置为训练模式 (Best Practice)
+    print(f"第 {i + 1} 轮训练开始")
     tudui.train()
 
     for data in train_dataloader:
         imgs, targets = data
-        # 数据转移到 CUDA
         imgs = imgs.to(device)
         targets = targets.to(device)
 
@@ -107,7 +96,6 @@ for i in range(epoch):
             print(f"训练次数: {total_train_step}, Loss: {loss.item()}")
             writer.add_scalar('train-loss', loss.item(), total_train_step)
 
-    # 4. 设置为评估模式 (Best Practice)
     tudui.eval()
 
     total_test_loss = 0
@@ -116,7 +104,6 @@ for i in range(epoch):
     with torch.no_grad():
         for data in test_dataloader:
             imgs, targets = data
-            # 数据转移到 CUDA
             imgs = imgs.to(device)
             targets = targets.to(device)
 
